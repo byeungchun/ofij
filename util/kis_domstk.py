@@ -1380,3 +1380,55 @@ def get_news_titles(tr_cont="", entp_code="", date_1="", hour_1=""):
     res = kis._url_fetch(url, tr_id, tr_cont, params, postFlag=False)
 
     return res.getBody().output
+
+
+def get_search_stock_info(pdno: str, prdt_type_cd: str = "300"):
+    """
+    [국내주식] 시세 > 주식기본조회 (CTPF1002R)
+    Retrieves basic information for a domestic stock item.
+
+    Args:
+        pdno (str): Product number (Stock ticker, 6 digits. ETNs start with 'Q').
+        prdt_type_cd (str, optional): Product type code.
+                                       Defaults to "300" (주식, ETF, ETN, ELW).
+                                       Other possible values: "301" (선물옵션), "302" (채권), "306" (ELS).
+
+    Returns:
+        dict: A dictionary containing the stock's basic information from the API response output,
+              or None if the API call fails or returns an error.
+    """
+    url = '/uapi/domestic-stock/v1/quotations/search-stock-info'
+    tr_id = "CTPF1002R"  # 거래ID: 주식기본조회
+    tr_cont = ""         # 연속 거래 여부 - 이 API는 단건 조회이므로 공백
+
+    if not pdno:
+        print("Error: Product number (pdno) is required.")
+        return None
+
+    params = {
+        "PRDT_TYPE_CD": prdt_type_cd,  # 상품유형코드
+        "PDNO": pdno                  # 상품번호 (종목코드)
+    }
+
+    # Call using your existing kis_auth module's _url_fetch method
+    # Assuming postFlag=False (or omitting it) results in a GET request
+    # If your _url_fetch requires explicit method specification, adjust accordingly
+    res = kis._url_fetch(url, tr_id, tr_cont, params) # Removed postFlag=True for GET request
+
+    # Check the response status code (rt_cd)
+    if res and hasattr(res.getBody(), 'rt_cd') and str(res.getBody().rt_cd) == "0":
+        # Success: return the 'output' dictionary containing stock details
+        return res.getBody().output
+    else:
+        # Error handling: print message and return None
+        if res and hasattr(res.getBody(), 'msg1'):
+            print(f"Error fetching stock info ({tr_id}): {res.getBody().msg_cd} - {res.getBody().msg1}")
+        elif res and hasattr(res.getBody(), 'msg'): # Some APIs might use 'msg'
+             print(f"Error fetching stock info ({tr_id}): {res.getBody().msg}")
+        elif res is None:
+            print(f"Error fetching stock info ({tr_id}): API call failed (No response).")
+        else:
+             print(f"Error fetching stock info ({tr_id}): API call failed or returned an error structure without rt_cd/msg1.")
+             # You might want to print the raw response body here for debugging if needed
+             # print(res.getBody())
+        return None
