@@ -8,12 +8,12 @@ import pandas as pd
 from datetime import datetime
 import duckdb
 
-import kis_auth as ka
-import kis_domstk as kb
-
 # -------------- PATH CONFIGURATION --------------
 UTIL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../util'))
 sys.path.append(UTIL_DIR)
+
+import kis_auth as ka
+import kis_domstk as kb
 # -------------- CONFIGURATION --------------
 
 HOME = os.path.expanduser('~')
@@ -95,14 +95,24 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 
 # ------------- CORE DAEMON LOGIC --------------
 
+MAX_RUNTIME_SECONDS = 23 * 60 * 60  # 23 hours
+
 def main_loop():
     ka.auth()  # Authenticate before main loop
 
     con = None
     total_rows_processed_today = 0
+    BUFFER = []
+    BUFFER_MAX_AGE = 300  # seconds (5 minutes)
+    last_commit_time = time.time()
+    start_time = time.time()
 
     while not shutdown_flag.shutting_down:
-        # Connect/reconnect to DB as needed
+        # ----- Check for auto-shutdown after MAX_RUNTIME_SECONDS -----
+        if time.time() - start_time > MAX_RUNTIME_SECONDS:
+            logger.info("Maximum runtime reached (23 hours). Triggering graceful shutdown to refresh API key.")
+            shutdown_flag.shutting_down = True
+            break  # exit the while loop to process buffer and cleanup
         if con is None:
             try:
                 con = duckdb.connect(database=DB_PATH, read_only=False)
@@ -127,8 +137,6 @@ def main_loop():
 
             if news_data:
                 news_chunk_df = pd.DataFrame(news_data)
-                rows_in_chunk = len(news_chunk_df)
-
                 cols_to_drop_actual = [col for col in DROP_COLS if col in news_chunk_df.columns]
                 if cols_to_drop_actual:
                     news_chunk_df.drop(cols_to_drop_actual, axis=1, inplace=True)
@@ -136,30 +144,55 @@ def main_loop():
                 if 'cntt_usiq_srno' not in news_chunk_df.columns:
                     logger.warning(f"'cntt_usiq_srno' missing in data chunk. Skipping insert.")
                 else:
-                    # Insert: safer to use duckdb's from_df
+                    BUFFER.append(news_chunk_df)
+                    total_rows_processed_today += len(news_chunk_df)
+                    logger.info(f"Buffered {len(news_chunk_df)} rows for {yyyymmdd_api}@{hhmmss_api[-6:]}")
+
+            now = time.time()
+            # flush buffer if interval passed, or if shutting down
+            if (now - last_commit_time >= BUFFER_MAX_AGE) or shutdown_flag.shutting_down:
+                if BUFFER:
                     try:
-                        # Register DataFrame as a DuckDB view or just use from_df
-                        con.register('news_chunk_df', news_chunk_df)
-                        con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM news_chunk_df")
-                        con.unregister('news_chunk_df')  # optional, cleans up when done
-                        total_rows_processed_today += rows_in_chunk
-                        logger.info(f"Inserted {rows_in_chunk} rows for {yyyymmdd_api}@{hhmmss_api[-6:]}")
+                        batch_df = pd.concat(BUFFER, ignore_index=True)
+                        con.begin()
+                        con.register('batch_df', batch_df)
+                        con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
+                        con.unregister('batch_df')
+                        con.commit()  # this flushes WAL etc.
+                        logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
                     except Exception as db_err:
-                        logger.error(f"Error inserting rows: {db_err}", exc_info=True)
+                        logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
+                        con.rollback()
+                    BUFFER.clear()
+                last_commit_time = now
 
         except Exception as e:
             logger.error(f"Error in processing loop: {e}", exc_info=True)
-            # Force DB reconnect on next loop
             if con:
                 con.close()
                 con = None
             time.sleep(60)
-        # Sleep for a short interval (tune as needed)
-        for _ in range(5):
+
+        # Sleep for a short interval (as before)
+        for _ in range(10):
             if shutdown_flag.shutting_down:
                 break
             time.sleep(1)
 
+    # Final flush on shutdown
+    if BUFFER:
+        logger.info("Final flush of buffered data before exiting ...")
+        try:
+            batch_df = pd.concat(BUFFER, ignore_index=True)
+            con.begin()
+            con.register('batch_df', batch_df)
+            con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
+            con.unregister('batch_df')
+            con.commit()
+            logger.info(f"Final commit: {len(batch_df)} rows.")
+        except Exception as db_err:
+            logger.error(f"Error on final batch insert: {db_err}", exc_info=True)
+            con.rollback()
     logger.info(f"Daemon main loop exiting. Total rows processed today: {total_rows_processed_today}")
     if con:
         con.close()
