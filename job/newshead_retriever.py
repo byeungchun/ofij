@@ -13,7 +13,7 @@ import kis_domstk as kb
 
 # -------------- PATH CONFIGURATION --------------
 UTIL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../util'))
-
+sys.path.append(UTIL_DIR)
 # -------------- CONFIGURATION --------------
 
 HOME = os.path.expanduser('~')
@@ -138,7 +138,10 @@ def main_loop():
                 else:
                     # Insert: safer to use duckdb's from_df
                     try:
-                        con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM news_chunk_df", {'news_chunk_df': news_chunk_df})
+                        # Register DataFrame as a DuckDB view or just use from_df
+                        con.register('news_chunk_df', news_chunk_df)
+                        con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM news_chunk_df")
+                        con.unregister('news_chunk_df')  # optional, cleans up when done
                         total_rows_processed_today += rows_in_chunk
                         logger.info(f"Inserted {rows_in_chunk} rows for {yyyymmdd_api}@{hhmmss_api[-6:]}")
                     except Exception as db_err:

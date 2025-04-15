@@ -35,7 +35,7 @@ key_bytes = 32
 
 # config_root = 'd:\\KIS\\config\\'  # 토큰 파일이 저장될 폴더, 제3자가 찾지 어렵도록 경로 설정하시기 바랍니다.
 
-config_root = os.path.join(os.path.expanduser('~'), 'KIS\\config\\')
+config_root = os.path.join(os.path.expanduser('~'), r'KIS/config/')
 os.makedirs(config_root, exist_ok=True)
 
 
