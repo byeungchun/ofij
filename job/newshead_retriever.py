@@ -104,9 +104,22 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 # ------------- CORE DAEMON LOGIC --------------
 
 
+def get_connection():
+    global con
+    if con is not None:
+        return con
+    try:
+        con = duckdb.connect(DB_PATH)
+        logger.info(f"Connected to DuckDB: {DB_PATH}")
+        con.execute(CREATE_TABLE_SQL)
+        return con
+    except Exception as e:
+        logger.error(f"Failed to connect to DuckDB: {e}", exc_info=True)
+        con = None
+        return None
+
 def main_loop():
     global con
-    # Remove: con = None
     total_rows_processed_today = 0
     BUFFER = []
     BUFFER_MAX_AGE = 300  # seconds (5 minutes)
@@ -114,66 +127,78 @@ def main_loop():
     start_time = time.time()
 
     while not shutdown_flag.shutting_down:
-        # --- as before ---
         try:
-            # Inside batching:
-            if BUFFER:
-                try:
+            # ... all fetch logic here (unchanged) ...
+            
+            now = time.time()
+            if (now - last_commit_time >= BUFFER_MAX_AGE) or shutdown_flag.shutting_down:
+                if BUFFER:
+                    con = get_connection()
                     if con is None:
-                        # Try to connect again
-                        con = duckdb.connect(DB_PATH)
-                        logger.info(f"Reconnected to DuckDB: {DB_PATH}")
-                    batch_df = pd.concat(BUFFER, ignore_index=True)
-                    con.begin()
-                    con.register('batch_df', batch_df)
-                    con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
-                    con.unregister('batch_df')
-                    con.commit()
-                    con.execute('CHECKPOINT')
-                    logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
-                except Exception as db_err:
-                    logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
-                    if con:  # Only rollback if connection exists
-                        con.rollback()
-                    else:
-                        logger.critical("Can't rollback, DuckDB connection is None!")
-                BUFFER.clear()
-            # last_commit_time = now
+                        logger.error("No DB connection for batch insert; will retry on next attempt.")
+                        # Don't clear BUFFER; keep for next try
+                        time.sleep(10)
+                        continue
+                    try:
+                        batch_df = pd.concat(BUFFER, ignore_index=True)
+                        con.begin()
+                        con.register('batch_df', batch_df)
+                        con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
+                        con.unregister('batch_df')
+                        con.commit()
+                        con.execute('CHECKPOINT')
+                        logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
+                        BUFFER.clear()  # Clear only after success!
+                        last_commit_time = now
+                    except Exception as db_err:
+                        logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
+                        try:
+                            con.rollback()
+                        except Exception:
+                            logger.error("Rollback failed or unnecessary.")
+                        # Optionally, set con=None here to force reconnection next time
+                        con = None
+                        time.sleep(10)
+                        # Don't clear BUFFER
+
         except Exception as e:
             logger.error(f"Error in processing loop: {e}", exc_info=True)
             if con:
-                con.close()
+                try:
+                    con.close()
+                except Exception:
+                    pass
                 con = None
             time.sleep(60)
 
-        # Sleep for a short interval (as before)
         for _ in range(20):
             if shutdown_flag.shutting_down:
                 break
             time.sleep(1)
 
-
+    # Final buffer flush at shutdown
     if BUFFER:
-        try:
-            if con is None:
-                con = duckdb.connect(DB_PATH)
-                logger.info(f"Reconnected to DuckDB: {DB_PATH}")
-                con.execute(CREATE_TABLE_SQL)
-            batch_df = pd.concat(BUFFER, ignore_index=True)
-            con.begin()
-            con.register('batch_df', batch_df)
-            con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
-            con.unregister('batch_df')
-            con.commit()
-            con.execute('CHECKPOINT')
-            logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
-        except Exception as db_err:
-            logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
-            if con:
-                con.rollback()
-            else:
-                logger.critical("Cannot rollback, con is None!")
-        BUFFER.clear()
+        con = get_connection()
+        if con is not None:
+            try:
+                batch_df = pd.concat(BUFFER, ignore_index=True)
+                con.begin()
+                con.register('batch_df', batch_df)
+                con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
+                con.unregister('batch_df')
+                con.commit()
+                con.execute('CHECKPOINT')
+                logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB at shutdown.")
+                BUFFER.clear()
+            except Exception as db_err:
+                logger.error(f"Error final batch inserting rows: {db_err}", exc_info=True)
+                try:
+                    con.rollback()
+                except Exception:
+                    pass
+        else:
+            logger.warning("Could not flush buffer at shutdown: no DB connection.")
+
 
 
 # ------------- DAEMON ENTRYPOINT --------------
