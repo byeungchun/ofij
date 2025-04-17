@@ -95,10 +95,11 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 
 # ------------- CORE DAEMON LOGIC --------------
 
-MAX_RUNTIME_SECONDS = 23 * 60 * 60  # 23 hours
 
 def main_loop():
-    ka.auth()  # Authenticate before main loop
+    ka.auth()  # Initial authentication
+    last_auth_time = time.time()
+    AUTH_RENEW_INTERVAL = 23 * 60 * 60  # 23 hours in seconds
 
     con = None
     total_rows_processed_today = 0
@@ -108,18 +109,16 @@ def main_loop():
     start_time = time.time()
 
     while not shutdown_flag.shutting_down:
-        # ----- Check for auto-shutdown after MAX_RUNTIME_SECONDS -----
-        if time.time() - start_time > MAX_RUNTIME_SECONDS:
-            logger.info("Maximum runtime reached (23 hours). Triggering graceful shutdown to refresh API key.")
-            shutdown_flag.shutting_down = True
-            break  # exit the while loop to process buffer and cleanup
-        if con is None:
+        # Periodically refresh auth
+        now = time.time()
+        if now - last_auth_time >= AUTH_RENEW_INTERVAL:
+            logger.info("24 hours passed -- refreshing ka.auth() for API key renewal.")
             try:
-                con = duckdb.connect(database=DB_PATH, read_only=False)
-                con.sql(CREATE_TABLE_SQL)
-                logger.info(f"Connected to DuckDB and ensured table exists: {TABLE_NAME}")
-            except Exception as e:
-                logger.critical(f"Failed to connect to DuckDB: {e}", exc_info=True)
+                ka.auth()
+                last_auth_time = now
+            except Exception as auth_err:
+                logger.error(f"Failed to refresh ka.auth(): {auth_err}")
+                # Optionally: retry after short sleep, or continue
                 time.sleep(60)
                 continue
 
@@ -158,7 +157,8 @@ def main_loop():
                         con.register('batch_df', batch_df)
                         con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
                         con.unregister('batch_df')
-                        con.commit()  # this flushes WAL etc.
+                        con.commit()
+                        con.execute('CHECKPOINT')
                         logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
                     except Exception as db_err:
                         logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
@@ -174,7 +174,7 @@ def main_loop():
             time.sleep(60)
 
         # Sleep for a short interval (as before)
-        for _ in range(10):
+        for _ in range(20):
             if shutdown_flag.shutting_down:
                 break
             time.sleep(1)
