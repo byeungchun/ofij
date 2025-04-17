@@ -51,14 +51,6 @@ def setup_logging(logfile):
 
 logger = setup_logging(LOG_FILE)
 
-try:
-    con = duckdb.connect(DB_PATH)
-    logger.info(f"Successfully connected to DuckDB: {DB_PATH}")
-except duckdb.Error as e:
-    logger.error(f"Error connecting to DuckDB: {e}", exc_info=True)
-    con = None  # Ensure con is None if connection fails
-
-
 # ------------- SIGNALS & GRACEFUL SHUTDOWN --------------
 class ShutdownFlag:
     shutting_down = False
@@ -103,103 +95,109 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 
 # ------------- CORE DAEMON LOGIC --------------
 
-
-def get_connection():
-    global con
-    if con is not None:
-        return con
-    try:
-        con = duckdb.connect(DB_PATH)
-        logger.info(f"Connected to DuckDB: {DB_PATH}")
-        con.execute(CREATE_TABLE_SQL)
-        return con
-    except Exception as e:
-        logger.error(f"Failed to connect to DuckDB: {e}", exc_info=True)
-        con = None
-        return None
+MAX_RUNTIME_SECONDS = 23 * 60 * 60  # 23 hours
 
 def main_loop():
-    global con
+    ka.auth()  # Authenticate before main loop
+
+    con = None
     total_rows_processed_today = 0
     BUFFER = []
-    BUFFER_MAX_AGE = 300  # seconds (5 minutes)
+    BUFFER_MAX_AGE = 30  # seconds (5 minutes)
     last_commit_time = time.time()
     start_time = time.time()
 
     while not shutdown_flag.shutting_down:
+        # ----- Check for auto-shutdown after MAX_RUNTIME_SECONDS -----
+        if time.time() - start_time > MAX_RUNTIME_SECONDS:
+            logger.info("Maximum runtime reached (23 hours). Triggering graceful shutdown to refresh API key.")
+            shutdown_flag.shutting_down = True
+            break  # exit the while loop to process buffer and cleanup
+        if con is None:
+            try:
+                con = duckdb.connect(database=DB_PATH, read_only=False)
+                con.sql(CREATE_TABLE_SQL)
+                logger.info(f"Connected to DuckDB and ensured table exists: {TABLE_NAME}")
+            except Exception as e:
+                logger.critical(f"Failed to connect to DuckDB: {e}", exc_info=True)
+                time.sleep(60)
+                continue
+
+        yyyymmdd_api = datetime.now().strftime('%Y%m%d')
+        hhmmss_api = datetime.now().strftime("%H%M%S").rjust(10, "0")
+
         try:
-            # ... all fetch logic here (unchanged) ...
-            
+            news_data = []
+            try:
+                news_data = kb.get_news_titles(date_1=yyyymmdd_api, hour_1=hhmmss_api)
+            except Exception as fetch_err:
+                logger.error(f"Error fetching data for {yyyymmdd_api}@{hhmmss_api}: {fetch_err}")
+                time.sleep(10)
+                continue
+
+            if news_data:
+                news_chunk_df = pd.DataFrame(news_data)
+                cols_to_drop_actual = [col for col in DROP_COLS if col in news_chunk_df.columns]
+                if cols_to_drop_actual:
+                    news_chunk_df.drop(cols_to_drop_actual, axis=1, inplace=True)
+
+                if 'cntt_usiq_srno' not in news_chunk_df.columns:
+                    logger.warning(f"'cntt_usiq_srno' missing in data chunk. Skipping insert.")
+                else:
+                    BUFFER.append(news_chunk_df)
+                    total_rows_processed_today += len(news_chunk_df)
+                    logger.info(f"Buffered {len(news_chunk_df)} rows for {yyyymmdd_api}@{hhmmss_api[-6:]}")
+
             now = time.time()
+            # flush buffer if interval passed, or if shutting down
             if (now - last_commit_time >= BUFFER_MAX_AGE) or shutdown_flag.shutting_down:
                 if BUFFER:
-                    con = get_connection()
-                    if con is None:
-                        logger.error("No DB connection for batch insert; will retry on next attempt.")
-                        # Don't clear BUFFER; keep for next try
-                        time.sleep(10)
-                        continue
                     try:
                         batch_df = pd.concat(BUFFER, ignore_index=True)
+                        # Remove duplicates based on 'cntt_usiq_srno' before inserting
+                        batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
                         con.begin()
                         con.register('batch_df', batch_df)
                         con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
                         con.unregister('batch_df')
-                        con.commit()
-                        con.execute('CHECKPOINT')
+                        con.commit()  # this flushes WAL etc.
                         logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
-                        BUFFER.clear()  # Clear only after success!
-                        last_commit_time = now
                     except Exception as db_err:
                         logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
-                        try:
-                            con.rollback()
-                        except Exception:
-                            logger.error("Rollback failed or unnecessary.")
-                        # Optionally, set con=None here to force reconnection next time
-                        con = None
-                        time.sleep(10)
-                        # Don't clear BUFFER
+                        con.rollback()
+                    BUFFER.clear()
+                last_commit_time = now
 
         except Exception as e:
             logger.error(f"Error in processing loop: {e}", exc_info=True)
             if con:
-                try:
-                    con.close()
-                except Exception:
-                    pass
+                con.close()
                 con = None
             time.sleep(60)
 
-        for _ in range(20):
+        # Sleep for a short interval (as before)
+        for _ in range(10):
             if shutdown_flag.shutting_down:
                 break
             time.sleep(1)
 
-    # Final buffer flush at shutdown
+    # Final flush on shutdown
     if BUFFER:
-        con = get_connection()
-        if con is not None:
-            try:
-                batch_df = pd.concat(BUFFER, ignore_index=True)
-                con.begin()
-                con.register('batch_df', batch_df)
-                con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
-                con.unregister('batch_df')
-                con.commit()
-                con.execute('CHECKPOINT')
-                logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB at shutdown.")
-                BUFFER.clear()
-            except Exception as db_err:
-                logger.error(f"Error final batch inserting rows: {db_err}", exc_info=True)
-                try:
-                    con.rollback()
-                except Exception:
-                    pass
-        else:
-            logger.warning("Could not flush buffer at shutdown: no DB connection.")
-
-
+        logger.info("Final flush of buffered data before exiting ...")
+        try:
+            batch_df = pd.concat(BUFFER, ignore_index=True)
+            con.begin()
+            con.register('batch_df', batch_df)
+            con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
+            con.unregister('batch_df')
+            con.commit()
+            logger.info(f"Final commit: {len(batch_df)} rows.")
+        except Exception as db_err:
+            logger.error(f"Error on final batch insert: {db_err}", exc_info=True)
+            con.rollback()
+    logger.info(f"Daemon main loop exiting. Total rows processed today: {total_rows_processed_today}")
+    if con:
+        con.close()
 
 # ------------- DAEMON ENTRYPOINT --------------
 def main():
