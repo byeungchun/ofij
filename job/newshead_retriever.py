@@ -51,6 +51,14 @@ def setup_logging(logfile):
 
 logger = setup_logging(LOG_FILE)
 
+try:
+    con = duckdb.connect(DB_PATH)
+    logger.info(f"Successfully connected to DuckDB: {DB_PATH}")
+except duckdb.Error as e:
+    logger.error(f"Error connecting to DuckDB: {e}", exc_info=True)
+    con = None  # Ensure con is None if connection fails
+
+
 # ------------- SIGNALS & GRACEFUL SHUTDOWN --------------
 class ShutdownFlag:
     shutting_down = False
