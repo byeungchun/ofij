@@ -103,7 +103,7 @@ def main_loop():
     con = None
     total_rows_processed_today = 0
     BUFFER = []
-    BUFFER_MAX_AGE = 30  # seconds (5 minutes)
+    BUFFER_MAX_AGE = 300  # seconds (5 minutes)
     last_commit_time = time.time()
     start_time = time.time()
 
@@ -161,6 +161,7 @@ def main_loop():
                         con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
                         con.unregister('batch_df')
                         con.commit()  # this flushes WAL etc.
+                        con.execute('CHECKPOINT')
                         logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
                     except Exception as db_err:
                         logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
@@ -176,7 +177,7 @@ def main_loop():
             time.sleep(60)
 
         # Sleep for a short interval (as before)
-        for _ in range(10):
+        for _ in range(20):
             if shutdown_flag.shutting_down:
                 break
             time.sleep(1)
