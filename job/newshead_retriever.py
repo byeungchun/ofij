@@ -105,11 +105,8 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
 
 
 def main_loop():
-    ka.auth()  # Initial authentication
-    last_auth_time = time.time()
-    AUTH_RENEW_INTERVAL = 23 * 60 * 60  # 23 hours in seconds
-
-    con = None
+    global con
+    # Remove: con = None
     total_rows_processed_today = 0
     BUFFER = []
     BUFFER_MAX_AGE = 300  # seconds (5 minutes)
@@ -117,63 +114,31 @@ def main_loop():
     start_time = time.time()
 
     while not shutdown_flag.shutting_down:
-        # Periodically refresh auth
-        now = time.time()
-        if now - last_auth_time >= AUTH_RENEW_INTERVAL:
-            logger.info("24 hours passed -- refreshing ka.auth() for API key renewal.")
-            try:
-                ka.auth()
-                last_auth_time = now
-            except Exception as auth_err:
-                logger.error(f"Failed to refresh ka.auth(): {auth_err}")
-                # Optionally: retry after short sleep, or continue
-                time.sleep(60)
-                continue
-
-        yyyymmdd_api = datetime.now().strftime('%Y%m%d')
-        hhmmss_api = datetime.now().strftime("%H%M%S").rjust(10, "0")
-
+        # --- as before ---
         try:
-            news_data = []
-            try:
-                news_data = kb.get_news_titles(date_1=yyyymmdd_api, hour_1=hhmmss_api)
-            except Exception as fetch_err:
-                logger.error(f"Error fetching data for {yyyymmdd_api}@{hhmmss_api}: {fetch_err}")
-                time.sleep(10)
-                continue
-
-            if news_data:
-                news_chunk_df = pd.DataFrame(news_data)
-                cols_to_drop_actual = [col for col in DROP_COLS if col in news_chunk_df.columns]
-                if cols_to_drop_actual:
-                    news_chunk_df.drop(cols_to_drop_actual, axis=1, inplace=True)
-
-                if 'cntt_usiq_srno' not in news_chunk_df.columns:
-                    logger.warning(f"'cntt_usiq_srno' missing in data chunk. Skipping insert.")
-                else:
-                    BUFFER.append(news_chunk_df)
-                    total_rows_processed_today += len(news_chunk_df)
-                    logger.info(f"Buffered {len(news_chunk_df)} rows for {yyyymmdd_api}@{hhmmss_api[-6:]}")
-
-            now = time.time()
-            # flush buffer if interval passed, or if shutting down
-            if (now - last_commit_time >= BUFFER_MAX_AGE) or shutdown_flag.shutting_down:
-                if BUFFER:
-                    try:
-                        batch_df = pd.concat(BUFFER, ignore_index=True)
-                        con.begin()
-                        con.register('batch_df', batch_df)
-                        con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
-                        con.unregister('batch_df')
-                        con.commit()
-                        con.execute('CHECKPOINT')
-                        logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
-                    except Exception as db_err:
-                        logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
+            # Inside batching:
+            if BUFFER:
+                try:
+                    if con is None:
+                        # Try to connect again
+                        con = duckdb.connect(DB_PATH)
+                        logger.info(f"Reconnected to DuckDB: {DB_PATH}")
+                    batch_df = pd.concat(BUFFER, ignore_index=True)
+                    con.begin()
+                    con.register('batch_df', batch_df)
+                    con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
+                    con.unregister('batch_df')
+                    con.commit()
+                    con.execute('CHECKPOINT')
+                    logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
+                except Exception as db_err:
+                    logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
+                    if con:  # Only rollback if connection exists
                         con.rollback()
-                    BUFFER.clear()
-                last_commit_time = now
-
+                    else:
+                        logger.critical("Can't rollback, DuckDB connection is None!")
+                BUFFER.clear()
+            # last_commit_time = now
         except Exception as e:
             logger.error(f"Error in processing loop: {e}", exc_info=True)
             if con:
@@ -187,23 +152,29 @@ def main_loop():
                 break
             time.sleep(1)
 
-    # Final flush on shutdown
+
     if BUFFER:
-        logger.info("Final flush of buffered data before exiting ...")
         try:
+            if con is None:
+                con = duckdb.connect(DB_PATH)
+                logger.info(f"Reconnected to DuckDB: {DB_PATH}")
+                con.execute(CREATE_TABLE_SQL)
             batch_df = pd.concat(BUFFER, ignore_index=True)
             con.begin()
             con.register('batch_df', batch_df)
             con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
             con.unregister('batch_df')
             con.commit()
-            logger.info(f"Final commit: {len(batch_df)} rows.")
+            con.execute('CHECKPOINT')
+            logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
         except Exception as db_err:
-            logger.error(f"Error on final batch insert: {db_err}", exc_info=True)
-            con.rollback()
-    logger.info(f"Daemon main loop exiting. Total rows processed today: {total_rows_processed_today}")
-    if con:
-        con.close()
+            logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
+            if con:
+                con.rollback()
+            else:
+                logger.critical("Cannot rollback, con is None!")
+        BUFFER.clear()
+
 
 # ------------- DAEMON ENTRYPOINT --------------
 def main():
