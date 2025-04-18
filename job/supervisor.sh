@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# nohup ./supervisor.sh >> $HOME/data/news/supervisor.log 2>&1 &
+
 # Absolute path to where run_newshead_retriever.sh is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCHER_SCRIPT="$SCRIPT_DIR/run_newshead_retriever.sh"

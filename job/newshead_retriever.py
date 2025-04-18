@@ -6,7 +6,9 @@ import logging
 import logging.handlers
 import pandas as pd
 from datetime import datetime
-import duckdb
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
 
 # -------------- PATH CONFIGURATION --------------
 UTIL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../util'))
@@ -78,18 +80,28 @@ def remove_pid(pidfile):
     except Exception:
         pass
 
-# ------------- DATABASE TABLE SCHEMA --------------
-CREATE_TABLE_SQL = f"""
-CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-    "cntt_usiq_srno"        VARCHAR NOT NULL UNIQUE,
-    "news_ofer_entp_code"   VARCHAR,
-    "data_dt"               VARCHAR(8),
-    "data_tm"               VARCHAR(6),
-    "hts_pbnt_titl_cntt"    VARCHAR,
-    "news_lrdv_code"        VARCHAR,
-    "dorg"                  VARCHAR,
-    "iscd1"                 VARCHAR,
-    "kor_isnm1"             VARCHAR
+# ---------- MYSQL CONFIGURATION -------------
+load_dotenv()  # automatically loads .env in current/parent dir
+
+mysql_host = os.getenv('MYSQL_HOST')
+mysql_db = os.getenv('MYSQL_DB')
+mysql_user = os.getenv('MYSQL_USER')
+mysql_pass = os.getenv('MYSQL_PASS')
+
+MYSQL_URL = f"mysql+pymysql://{mysql_user}:{mysql_pass}@{mysql_host}/{mysql_db}"
+
+# Table creation SQL for MySQL
+create_table_sql = """
+CREATE TABLE IF NOT EXISTS news_titles (
+    cntt_usiq_srno VARCHAR(255) NOT NULL UNIQUE,
+    news_ofer_entp_code VARCHAR(255),
+    data_dt VARCHAR(32),
+    data_tm VARCHAR(32),
+    hts_pbnt_titl_cntt TEXT,
+    news_lrdv_code VARCHAR(255),
+    dorg VARCHAR(255),
+    iscd1 VARCHAR(255),
+    kor_isnm1 VARCHAR(255)
 );
 """
 
@@ -100,12 +112,14 @@ MAX_RUNTIME_SECONDS = 23 * 60 * 60  # 23 hours
 def main_loop():
     ka.auth()  # Authenticate before main loop
 
-    con = None
+    # con = None
     total_rows_processed_today = 0
     BUFFER = []
     BUFFER_MAX_AGE = 300  # seconds (5 minutes)
     last_commit_time = time.time()
     start_time = time.time()
+
+    engine = create_engine(MYSQL_URL)
 
     while not shutdown_flag.shutting_down:
         # ----- Check for auto-shutdown after MAX_RUNTIME_SECONDS -----
@@ -113,15 +127,16 @@ def main_loop():
             logger.info("Maximum runtime reached (23 hours). Triggering graceful shutdown to refresh API key.")
             shutdown_flag.shutting_down = True
             break  # exit the while loop to process buffer and cleanup
-        if con is None:
-            try:
-                con = duckdb.connect(database=DB_PATH, read_only=False)
-                con.sql(CREATE_TABLE_SQL)
-                logger.info(f"Connected to DuckDB and ensured table exists: {TABLE_NAME}")
-            except Exception as e:
-                logger.critical(f"Failed to connect to DuckDB: {e}", exc_info=True)
-                time.sleep(60)
-                continue
+        # if con is None:
+        #     try:
+        #         engine = create_engine(MYSQL_URL)
+        #         with engine.connect() as conn:
+        #             conn.execute(text(create_table_sql))
+        #         logger.info("Connected to MySQL and ensured table exists.")
+        #     except Exception as e:
+        #         logger.critical(f"Failed to connect to DuckDB: {e}", exc_info=True)
+        #         time.sleep(60)
+        #         continue
 
         yyyymmdd_api = datetime.now().strftime('%Y%m%d')
         hhmmss_api = datetime.now().strftime("%H%M%S").rjust(10, "0")
@@ -154,26 +169,20 @@ def main_loop():
                 if BUFFER:
                     try:
                         batch_df = pd.concat(BUFFER, ignore_index=True)
-                        # Remove duplicates based on 'cntt_usiq_srno' before inserting
                         batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
-                        con.begin()
-                        con.register('batch_df', batch_df)
-                        con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
-                        con.unregister('batch_df')
-                        con.commit()  # this flushes WAL etc.
-                        con.execute('CHECKPOINT')
-                        logger.info(f"Committed batch of {len(batch_df)} rows to DuckDB.")
+                        # Bulk insert to MySQL; will duplicate on unique error, so use 'ignore'
+                        batch_df.to_sql('news_titles', engine, if_exists='append', index=False, method='multi')
+                        logger.info(f"Committed batch of {len(batch_df)} rows to MySQL.")
                     except Exception as db_err:
                         logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
-                        con.rollback()
                     BUFFER.clear()
                 last_commit_time = now
 
         except Exception as e:
             logger.error(f"Error in processing loop: {e}", exc_info=True)
-            if con:
-                con.close()
-                con = None
+            # if con:
+            #     con.close()
+            #     con = None
             time.sleep(60)
 
         # Sleep for a short interval (as before)
@@ -187,18 +196,12 @@ def main_loop():
         logger.info("Final flush of buffered data before exiting ...")
         try:
             batch_df = pd.concat(BUFFER, ignore_index=True)
-            con.begin()
-            con.register('batch_df', batch_df)
-            con.execute(f"INSERT OR IGNORE INTO {TABLE_NAME} SELECT * FROM batch_df")
-            con.unregister('batch_df')
-            con.commit()
+            batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
+            batch_df.to_sql('news_titles', engine, if_exists='append', index=False, method='multi')
             logger.info(f"Final commit: {len(batch_df)} rows.")
         except Exception as db_err:
             logger.error(f"Error on final batch insert: {db_err}", exc_info=True)
-            con.rollback()
     logger.info(f"Daemon main loop exiting. Total rows processed today: {total_rows_processed_today}")
-    if con:
-        con.close()
 
 # ------------- DAEMON ENTRYPOINT --------------
 def main():
