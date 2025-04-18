@@ -4,6 +4,8 @@ import time
 import signal
 import logging
 import logging.handlers
+
+import numpy as np
 import pandas as pd
 from datetime import datetime
 
@@ -80,6 +82,17 @@ def remove_pid(pidfile):
     except Exception:
         pass
 
+def insert_ignore_mysql(df, table, engine):
+    if df.empty:
+        return
+    # Build column list and value tuple placeholders
+    cols = ','.join(f"`{c}`" for c in df.columns)
+    vals = ','.join(['%s'] * len(df.columns))
+    sql = f"INSERT IGNORE INTO {table} ({cols}) VALUES ({vals})"
+    data = [tuple(row) for row in df.to_numpy()]
+    with engine.begin() as conn:
+        conn.execute(sql, data)
+
 # ---------- MYSQL CONFIGURATION -------------
 load_dotenv()  # automatically loads .env in current/parent dir
 
@@ -126,17 +139,7 @@ def main_loop():
         if time.time() - start_time > MAX_RUNTIME_SECONDS:
             logger.info("Maximum runtime reached (23 hours). Triggering graceful shutdown to refresh API key.")
             shutdown_flag.shutting_down = True
-            break  # exit the while loop to process buffer and cleanup
-        # if con is None:
-        #     try:
-        #         engine = create_engine(MYSQL_URL)
-        #         with engine.connect() as conn:
-        #             conn.execute(text(create_table_sql))
-        #         logger.info("Connected to MySQL and ensured table exists.")
-        #     except Exception as e:
-        #         logger.critical(f"Failed to connect to DuckDB: {e}", exc_info=True)
-        #         time.sleep(60)
-        #         continue
+            break 
 
         yyyymmdd_api = datetime.now().strftime('%Y%m%d')
         hhmmss_api = datetime.now().strftime("%H%M%S").rjust(10, "0")
@@ -171,15 +174,7 @@ def main_loop():
                         batch_df = pd.concat(BUFFER, ignore_index=True)
                         batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
                         # Bulk insert to MySQL; will duplicate on unique error, so use 'ignore'
-                        batch_df.to_sql(
-                            'news_titles',
-                            engine,
-                            if_exists='append',
-                            index=False,
-                            method='multi',
-                            dtype=None,
-                            on_duplicate_key="IGNORE"
-                        )
+                        insert_ignore_mysql(batch_df, 'news_titles', engine)
                         logger.info(f"Committed batch of {len(batch_df)} rows to MySQL.")
                     except Exception as db_err:
                         logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
@@ -188,9 +183,6 @@ def main_loop():
 
         except Exception as e:
             logger.error(f"Error in processing loop: {e}", exc_info=True)
-            # if con:
-            #     con.close()
-            #     con = None
             time.sleep(60)
 
         # Sleep for a short interval (as before)
@@ -205,15 +197,7 @@ def main_loop():
         try:
             batch_df = pd.concat(BUFFER, ignore_index=True)
             batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
-            batch_df.to_sql(
-                'news_titles',
-                engine,
-                if_exists='append',
-                index=False,
-                method='multi',
-                dtype=None,
-                on_duplicate_key="IGNORE"
-            )
+            insert_ignore_mysql(batch_df, 'news_titles', engine)
             logger.info(f"Final commit: {len(batch_df)} rows.")
         except Exception as db_err:
             logger.error(f"Error on final batch insert: {db_err}", exc_info=True)
