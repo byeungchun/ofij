@@ -1,4 +1,5 @@
 #!/bin/bash
+source "$HOME/Env/ofij/bin/activate"
 
 # Absolute path to where your script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

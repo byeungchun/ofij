@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # nohup ./supervisor.sh >> $HOME/data/news/supervisor.log 2>&1 &
+source "$HOME/Env/ofij/bin/activate"
 
 # Absolute path to where run_newshead_retriever.sh is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

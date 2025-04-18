@@ -171,7 +171,15 @@ def main_loop():
                         batch_df = pd.concat(BUFFER, ignore_index=True)
                         batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
                         # Bulk insert to MySQL; will duplicate on unique error, so use 'ignore'
-                        batch_df.to_sql('news_titles', engine, if_exists='append', index=False, method='multi')
+                        batch_df.to_sql(
+                            'news_titles',
+                            engine,
+                            if_exists='append',
+                            index=False,
+                            method='multi',
+                            dtype=None,
+                            on_duplicate_key="IGNORE"
+                        )
                         logger.info(f"Committed batch of {len(batch_df)} rows to MySQL.")
                     except Exception as db_err:
                         logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
@@ -197,7 +205,15 @@ def main_loop():
         try:
             batch_df = pd.concat(BUFFER, ignore_index=True)
             batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
-            batch_df.to_sql('news_titles', engine, if_exists='append', index=False, method='multi')
+            batch_df.to_sql(
+                'news_titles',
+                engine,
+                if_exists='append',
+                index=False,
+                method='multi',
+                dtype=None,
+                on_duplicate_key="IGNORE"
+            )
             logger.info(f"Final commit: {len(batch_df)} rows.")
         except Exception as db_err:
             logger.error(f"Error on final batch insert: {db_err}", exc_info=True)
