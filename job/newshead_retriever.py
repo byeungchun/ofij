@@ -82,17 +82,6 @@ def remove_pid(pidfile):
     except Exception:
         pass
 
-def insert_ignore_mysql(df, table, engine):
-    if df.empty:
-        return
-    # Build column list and value tuple placeholders
-    cols = ','.join(f"`{c}`" for c in df.columns)
-    vals = ','.join(['%s'] * len(df.columns))
-    sql = f"INSERT IGNORE INTO {table} ({cols}) VALUES ({vals})"
-    data = [tuple(row) for row in df.to_numpy()]
-    with engine.begin() as conn:
-        conn.execute(sql, data)
-
 # ---------- MYSQL CONFIGURATION -------------
 load_dotenv()  # automatically loads .env in current/parent dir
 
@@ -174,7 +163,17 @@ def main_loop():
                         batch_df = pd.concat(BUFFER, ignore_index=True)
                         batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
                         # Bulk insert to MySQL; will duplicate on unique error, so use 'ignore'
-                        insert_ignore_mysql(batch_df, 'news_titles', engine)
+                        try:
+                            batch_df.to_sql(
+                                'news_titles',
+                                engine,
+                                if_exists='append',
+                                index=False,
+                                method='multi',  # Not using executemany specifically, 'multi' composes multi-row INSERT statement
+                            )
+                        except Exception as e:
+                            # Handle IntegrityError, etc. if you wish
+                            print("Insert error:", e)
                         logger.info(f"Committed batch of {len(batch_df)} rows to MySQL.")
                     except Exception as db_err:
                         logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
@@ -197,7 +196,17 @@ def main_loop():
         try:
             batch_df = pd.concat(BUFFER, ignore_index=True)
             batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
-            insert_ignore_mysql(batch_df, 'news_titles', engine)
+            try:
+                batch_df.to_sql(
+                    'news_titles',
+                    engine,
+                    if_exists='append',
+                    index=False,
+                    method='multi',  # Not using executemany specifically, 'multi' composes multi-row INSERT statement
+                )
+            except Exception as e:
+                # Handle IntegrityError, etc. if you wish
+                print("Insert error:", e)
             logger.info(f"Final commit: {len(batch_df)} rows.")
         except Exception as db_err:
             logger.error(f"Error on final batch insert: {db_err}", exc_info=True)
