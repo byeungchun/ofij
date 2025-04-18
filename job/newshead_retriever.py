@@ -121,7 +121,7 @@ def main_loop():
     last_commit_time = time.time()
     start_time = time.time()
 
-    engine = create_engine(MYSQL_URL)
+    engine = create_engine(MYSQL_URL, isolation_level="AUTOCOMMIT")
 
     while not shutdown_flag.shutting_down:
         # ----- Check for auto-shutdown after MAX_RUNTIME_SECONDS -----
@@ -163,17 +163,18 @@ def main_loop():
                         batch_df = pd.concat(BUFFER, ignore_index=True)
                         batch_df.drop_duplicates(subset=['cntt_usiq_srno'], keep='first', inplace=True)
                         # Bulk insert to MySQL; will duplicate on unique error, so use 'ignore'
-                        try:
-                            batch_df.to_sql(
-                                'news_titles',
-                                engine,
-                                if_exists='append',
-                                index=False,
-                                method='multi',  # Not using executemany specifically, 'multi' composes multi-row INSERT statement
-                            )
-                        except Exception as e:
-                            # Handle IntegrityError, etc. if you wish
-                            print("Insert error:", e)
+                        with engine.connect() as conn:
+                            try:
+                                batch_df.to_sql(
+                                    'news_titles',
+                                    engine,
+                                    if_exists='replace',
+                                    index=False,
+                                    method='multi',  # Not using executemany specifically, 'multi' composes multi-row INSERT statement
+                                )
+                            except Exception as e:
+                                conn.rollback()  # Rollback in case of error
+                                print("Insert error:", e)
                         logger.info(f"Committed batch of {len(batch_df)} rows to MySQL.")
                     except Exception as db_err:
                         logger.error(f"Error batch inserting rows: {db_err}", exc_info=True)
@@ -200,7 +201,7 @@ def main_loop():
                 batch_df.to_sql(
                     'news_titles',
                     engine,
-                    if_exists='append',
+                    if_exists='replace',
                     index=False,
                     method='multi',  # Not using executemany specifically, 'multi' composes multi-row INSERT statement
                 )
