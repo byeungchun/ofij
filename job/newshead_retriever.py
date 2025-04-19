@@ -121,7 +121,7 @@ def main_loop():
     last_commit_time = time.time()
     start_time = time.time()
 
-    engine = create_engine(MYSQL_URL, isolation_level="AUTOCOMMIT")
+    engine = create_engine(MYSQL_URL, isolation_level="AUTOCOMMIT", pool_pre_ping=True)
 
     while not shutdown_flag.shutting_down:
         # ----- Check for auto-shutdown after MAX_RUNTIME_SECONDS -----
@@ -168,7 +168,7 @@ def main_loop():
                                 batch_df.to_sql(
                                     'news_titles',
                                     engine,
-                                    if_exists='replace',
+                                    if_exists='append',
                                     index=False,
                                     method='multi',  # Not using executemany specifically, 'multi' composes multi-row INSERT statement
                                 )
@@ -201,7 +201,7 @@ def main_loop():
                 batch_df.to_sql(
                     'news_titles',
                     engine,
-                    if_exists='replace',
+                    if_exists='append',
                     index=False,
                     method='multi',  # Not using executemany specifically, 'multi' composes multi-row INSERT statement
                 )
