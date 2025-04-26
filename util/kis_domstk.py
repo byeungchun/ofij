@@ -1432,3 +1432,31 @@ def get_search_stock_info(pdno: str, prdt_type_cd: str = "300"):
              # You might want to print the raw response body here for debugging if needed
              # print(res.getBody())
         return None
+
+def get_domestic_sector_price(
+    mrkt_div_code="U",
+    iscd="",
+    date_1="",
+    date_2="",
+    period_div_code="D",
+    tr_cont=""
+):
+    url = '/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice'
+    tr_id = "FHKUP03500100"  # <-- Use actual TR_ID for this API
+
+    params = {
+        "FID_COND_MRKT_DIV_CODE": mrkt_div_code,  # 업종: "U"
+        "FID_INPUT_ISCD": iscd,
+        "FID_INPUT_DATE_1": date_1,
+        "FID_INPUT_DATE_2": date_2,
+        "FID_PERIOD_DIV_CODE": period_div_code     # D, W, M, Y
+    }
+
+    # Optional: For paginated requests
+    if tr_cont:
+        params['tr_cont'] = tr_cont
+
+    # Assuming kis is some client you've set up for API interaction
+    res = kis._url_fetch(url, tr_id, tr_cont, params, postFlag=False)
+
+    return res.getBody()

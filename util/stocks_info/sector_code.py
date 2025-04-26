@@ -28,8 +28,14 @@ def get_sector_master_dataframe(base_dir):
             # print(df.loc[ridx])  # 파일 작성중인 것을 확인할 수 있음
             ridx += 1
 
+    if os.path.exists("idxcode.zip"):
+        os.remove("idxcode.zip")
+    if os.path.exists(file_name):
+        os.remove(file_name)
+
     return df
 
 df2 = get_sector_master_dataframe(base_dir)
-df2.to_excel('idxcode.xlsx',index=False) # 현재 위치에 엑셀파일로 저장
-df2
+# df2.to_excel('idxcode.xlsx',index=False) # 현재 위치에 엑셀파일로 저장
+df2.to_csv('idxcode.csv',index=False) 
+# df2
